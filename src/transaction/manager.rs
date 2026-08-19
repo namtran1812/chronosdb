@@ -113,6 +113,14 @@ impl TransactionManager {
         &self.active
     }
 
+    pub fn oldest_active_xmin(&self) -> TransactionId {
+        self.active
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(self.next_transaction_id)
+    }
+
     pub fn current_snapshot(&self) -> Snapshot {
         let xmin = self
             .active

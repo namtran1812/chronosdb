@@ -223,6 +223,16 @@ impl DurableTransactionalHeap {
         Ok(self.heap.get_version(record_id)?)
     }
 
+    pub fn vacuum(&mut self) -> Result<usize, DurableTransactionalHeapError> {
+        let horizon = self.transactions.oldest_active_xmin();
+
+        let transactions = &self.transactions;
+
+        Ok(self
+            .heap
+            .vacuum(horizon, |transaction_id| transactions.state(transaction_id))?)
+    }
+
     pub fn sync(&mut self) -> Result<(), DurableTransactionalHeapError> {
         self.heap.flush_all()?;
         Ok(())

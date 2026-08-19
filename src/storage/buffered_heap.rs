@@ -105,6 +105,38 @@ impl BufferedHeapFile {
         Ok(rows)
     }
 
+    pub fn vacuum<F>(
+        &mut self,
+        oldest_active_xmin: TransactionId,
+        mut state_of: F,
+    ) -> Result<usize, BufferedHeapError>
+    where
+        F: FnMut(TransactionId) -> Option<TransactionState>,
+    {
+        let mut reclaimed = 0;
+
+        for page_id in 0..self.page_count() {
+            let slotted = self.read_slotted(page_id)?;
+
+            let mut mvcc = MvccPage::from_slotted(page_id, slotted);
+
+            let page_reclaimed = mvcc.vacuum(oldest_active_xmin, &mut state_of)?;
+
+            if page_reclaimed > 0 {
+                /*
+                 * This writes the compacted page through
+                 * BufferPoolManager::logged_write(), so
+                 * vacuum itself is WAL-protected.
+                 */
+                self.write_mvcc_page(page_id, mvcc)?;
+
+                reclaimed += page_reclaimed;
+            }
+        }
+
+        Ok(reclaimed)
+    }
+
     pub fn flush_all(&mut self) -> Result<(), BufferedHeapError> {
         self.buffer.flush_all()?;
         Ok(())

@@ -341,3 +341,87 @@ fn aborted_xmax_releases_write_conflict() {
         None
     );
 }
+
+#[test]
+fn aborted_insert_is_reclaimable() {
+    let mut manager = TransactionManager::new();
+
+    let writer = manager.begin();
+
+    let version = TupleVersion::new(writer.id(), b"dead".to_vec());
+
+    manager.abort(writer.id()).unwrap();
+
+    let horizon = manager.oldest_active_xmin();
+
+    assert!(version.reclaimable(horizon, |txid| manager.state(txid),));
+}
+
+#[test]
+fn active_delete_is_not_reclaimable() {
+    let mut manager = TransactionManager::new();
+
+    let creator = manager.begin();
+
+    let mut version = TupleVersion::new(creator.id(), b"alive".to_vec());
+
+    manager.commit(creator.id()).unwrap();
+
+    let deleter = manager.begin();
+
+    version.mark_deleted(deleter.id());
+
+    let horizon = manager.oldest_active_xmin();
+
+    assert!(!version.reclaimable(horizon, |txid| manager.state(txid),));
+}
+
+#[test]
+fn committed_delete_before_horizon_is_reclaimable() {
+    let mut manager = TransactionManager::new();
+
+    let creator = manager.begin();
+
+    let mut version = TupleVersion::new(creator.id(), b"old".to_vec());
+
+    manager.commit(creator.id()).unwrap();
+
+    let deleter = manager.begin();
+
+    version.mark_deleted(deleter.id());
+
+    manager.commit(deleter.id()).unwrap();
+
+    let reader = manager.begin();
+
+    let horizon = manager.oldest_active_xmin();
+
+    assert!(version.reclaimable(horizon, |txid| manager.state(txid),));
+
+    manager.abort(reader.id()).unwrap();
+}
+
+#[test]
+fn old_active_snapshot_blocks_reclamation() {
+    let mut manager = TransactionManager::new();
+
+    let creator = manager.begin();
+
+    let mut version = TupleVersion::new(creator.id(), b"old".to_vec());
+
+    manager.commit(creator.id()).unwrap();
+
+    let old_reader = manager.begin();
+
+    let deleter = manager.begin();
+
+    version.mark_deleted(deleter.id());
+
+    manager.commit(deleter.id()).unwrap();
+
+    let horizon = manager.oldest_active_xmin();
+
+    assert!(!version.reclaimable(horizon, |txid| manager.state(txid),));
+
+    manager.abort(old_reader.id()).unwrap();
+}

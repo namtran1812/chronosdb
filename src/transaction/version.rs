@@ -61,6 +61,32 @@ impl TupleVersion {
         !transaction_visible(xmax, deleter_state, snapshot, reader)
     }
 
+    pub fn reclaimable<F>(&self, oldest_active_xmin: TransactionId, mut state_of: F) -> bool
+    where
+        F: FnMut(TransactionId) -> Option<TransactionState>,
+    {
+        /*
+         * An aborted creator can never become visible again.
+         */
+        if matches!(state_of(self.xmin), Some(TransactionState::Aborted)) {
+            return true;
+        }
+
+        /*
+         * A version deleted by a committed transaction is safe
+         * to reclaim only when that transaction precedes the
+         * oldest snapshot that can still be active.
+         *
+         * Active/aborted/unknown deleters cannot make the
+         * version garbage.
+         */
+        let Some(xmax) = self.xmax else {
+            return false;
+        };
+
+        matches!(state_of(xmax), Some(TransactionState::Committed)) && xmax < oldest_active_xmin
+    }
+
     pub fn conflicting_writer<F>(
         &self,
         writer: TransactionId,

@@ -141,6 +141,16 @@ impl TransactionalHeap {
         Ok(self.heap.insert_version(&new_version)?)
     }
 
+    pub fn vacuum(&mut self) -> Result<usize, TransactionalHeapError> {
+        let horizon = self.transactions.oldest_active_xmin();
+
+        let transactions = &self.transactions;
+
+        Ok(self
+            .heap
+            .vacuum(horizon, |transaction_id| transactions.state(transaction_id))?)
+    }
+
     pub fn sync(&mut self) -> Result<(), TransactionalHeapError> {
         self.heap.sync()?;
         Ok(())

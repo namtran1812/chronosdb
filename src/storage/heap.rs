@@ -123,6 +123,35 @@ impl HeapFile {
         Ok(rows)
     }
 
+    pub fn vacuum<F>(
+        &mut self,
+        oldest_active_xmin: TransactionId,
+        mut state_of: F,
+    ) -> Result<usize, HeapFileError>
+    where
+        F: FnMut(TransactionId) -> Option<TransactionState>,
+    {
+        let mut reclaimed = 0;
+
+        for page_id in 0..self.disk.page_count() {
+            let page = self.disk.read_page(page_id)?;
+
+            let slotted = self.page_to_slotted(&page);
+
+            let mut mvcc = MvccPage::from_slotted(page_id, slotted);
+
+            let page_reclaimed = mvcc.vacuum(oldest_active_xmin, &mut state_of)?;
+
+            if page_reclaimed > 0 {
+                self.persist_mvcc_page(page_id, mvcc)?;
+
+                reclaimed += page_reclaimed;
+            }
+        }
+
+        Ok(reclaimed)
+    }
+
     pub fn sync(&mut self) -> Result<(), HeapFileError> {
         self.disk.sync()?;
 

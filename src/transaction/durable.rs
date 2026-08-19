@@ -103,4 +103,8 @@ impl DurableTransactionManager {
     pub fn latest_lsn(&self) -> Option<crate::recovery::Lsn> {
         self.wal.borrow().next_lsn().checked_sub(1)
     }
+
+    pub fn oldest_active_xmin(&self) -> TransactionId {
+        self.manager.oldest_active_xmin()
+    }
 }

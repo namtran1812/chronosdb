@@ -582,3 +582,187 @@ fn committed_writer_blocks_stale_snapshot_write() {
         ) if owner == first.id()
     ));
 }
+
+#[test]
+fn vacuum_reclaims_aborted_insert() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let writer = db.begin().unwrap();
+
+    db.insert(writer.id(), b"dead".to_vec()).unwrap();
+
+    db.abort(writer.id()).unwrap();
+
+    assert_eq!(db.vacuum().unwrap(), 1);
+}
+
+#[test]
+fn old_reader_blocks_vacuum_of_updated_version() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"old".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    /*
+     * This snapshot must retain the old version.
+     */
+    let old_reader = db.begin().unwrap();
+
+    let updater = db.begin().unwrap();
+
+    db.update(&updater, record, b"new".to_vec()).unwrap();
+
+    db.commit(updater.id()).unwrap();
+
+    assert_eq!(db.vacuum().unwrap(), 0);
+
+    let rows = db.visible_scan(&old_reader).unwrap();
+
+    assert_eq!(rows.len(), 1);
+
+    assert_eq!(rows[0].1.payload(), b"old");
+
+    db.commit(old_reader.id()).unwrap();
+
+    assert_eq!(db.vacuum().unwrap(), 1);
+}
+
+#[test]
+fn vacuum_reclaims_committed_delete() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"gone".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    let deleter = db.begin().unwrap();
+
+    db.delete(&deleter, record).unwrap();
+
+    db.commit(deleter.id()).unwrap();
+
+    assert_eq!(db.vacuum().unwrap(), 1);
+
+    let reader = db.begin().unwrap();
+
+    assert!(db.visible_scan(&reader,).unwrap().is_empty());
+}
+
+#[test]
+fn vacuum_does_not_reclaim_aborted_delete() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"keep".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    let deleter = db.begin().unwrap();
+
+    db.delete(&deleter, record).unwrap();
+
+    db.abort(deleter.id()).unwrap();
+
+    assert_eq!(db.vacuum().unwrap(), 0);
+
+    let reader = db.begin().unwrap();
+
+    let rows = db.visible_scan(&reader).unwrap();
+
+    assert_eq!(rows.len(), 1);
+
+    assert_eq!(rows[0].1.payload(), b"keep");
+}
+
+#[test]
+fn vacuumed_slot_is_reused() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let failed = db.begin().unwrap();
+
+    let dead = db.insert(failed.id(), b"dead".to_vec()).unwrap();
+
+    db.abort(failed.id()).unwrap();
+
+    assert_eq!(db.vacuum().unwrap(), 1);
+
+    let writer = db.begin().unwrap();
+
+    let live = db.insert(writer.id(), b"live".to_vec()).unwrap();
+
+    /*
+     * SlottedPage preferentially reuses
+     * tombstoned SlotIds.
+     */
+    assert_eq!(live.page_id(), dead.page_id());
+
+    assert_eq!(live.slot_id(), dead.slot_id());
+}
+
+#[test]
+fn vacuum_survives_restart() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    {
+        let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+        let failed = db.begin().unwrap();
+
+        db.insert(failed.id(), b"dead".to_vec()).unwrap();
+
+        db.abort(failed.id()).unwrap();
+
+        assert_eq!(db.vacuum().unwrap(), 1);
+
+        /*
+         * Vacuum page mutation is WAL-backed;
+         * no explicit sync here.
+         */
+    }
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let reader = db.begin().unwrap();
+
+    assert!(db.visible_scan(&reader,).unwrap().is_empty());
+}

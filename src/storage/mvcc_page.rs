@@ -96,4 +96,41 @@ impl MvccPage {
     pub fn slotted(&self) -> &SlottedPage {
         &self.page
     }
+
+    pub fn vacuum<F>(
+        &mut self,
+        oldest_active_xmin: TransactionId,
+        mut state_of: F,
+    ) -> Result<usize, MvccPageError>
+    where
+        F: FnMut(TransactionId) -> Option<TransactionState>,
+    {
+        let mut reclaimed = 0;
+
+        for slot_id in 0..self.page.slot_count() {
+            let bytes = match self.page.get(slot_id) {
+                Ok(bytes) => bytes,
+                Err(SlottedPageError::Deleted) => {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error.into());
+                }
+            };
+
+            let version = decode_tuple(bytes)?;
+
+            if version.reclaimable(oldest_active_xmin, &mut state_of) {
+                self.page.delete(slot_id)?;
+
+                reclaimed += 1;
+            }
+        }
+
+        if reclaimed > 0 {
+            self.page.compact();
+        }
+
+        Ok(reclaimed)
+    }
 }
