@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::transaction::{TransactionId, TransactionState};
 
-use super::{LogManager, LogRecordType};
+use super::{Checkpoint, LogManager, LogRecord, LogRecordType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredTransactions {
@@ -25,23 +25,39 @@ impl RecoveredTransactions {
 }
 
 pub fn recover_transactions(log: &mut LogManager) -> std::io::Result<RecoveredTransactions> {
-    let records = log.records()?;
+    recover_from_records(HashMap::new(), 1, log.records()?)
+}
 
-    let mut states = HashMap::new();
+pub fn recover_transactions_after_checkpoint(
+    checkpoint: &Checkpoint,
+    log: &mut LogManager,
+) -> std::io::Result<RecoveredTransactions> {
+    recover_from_records(
+        checkpoint.states().clone(),
+        checkpoint.next_transaction_id(),
+        log.records_after(checkpoint.lsn())?,
+    )
+}
 
-    let mut max_id = 0;
-
+fn recover_from_records(
+    mut states: HashMap<TransactionId, TransactionState>,
+    mut next_transaction_id: TransactionId,
+    records: Vec<LogRecord>,
+) -> std::io::Result<RecoveredTransactions> {
     for record in records {
         let Some(transaction_id) = record.transaction_id() else {
             continue;
         };
 
-        max_id = max_id.max(transaction_id);
+        next_transaction_id = next_transaction_id.max(transaction_id + 1);
 
         let state = match record.record_type {
             LogRecordType::TransactionBegin => TransactionState::Active,
+
             LogRecordType::TransactionCommit => TransactionState::Committed,
+
             LogRecordType::TransactionAbort => TransactionState::Aborted,
+
             LogRecordType::PageWrite => {
                 continue;
             }
@@ -51,8 +67,8 @@ pub fn recover_transactions(log: &mut LogManager) -> std::io::Result<RecoveredTr
     }
 
     /*
-     * Any transaction that was active when the process crashed
-     * is treated as aborted during restart.
+     * Any transaction still active at recovery time
+     * is considered crash-aborted.
      */
     for state in states.values_mut() {
         if *state == TransactionState::Active {
@@ -62,6 +78,6 @@ pub fn recover_transactions(log: &mut LogManager) -> std::io::Result<RecoveredTr
 
     Ok(RecoveredTransactions {
         states,
-        next_transaction_id: max_id + 1,
+        next_transaction_id,
     })
 }

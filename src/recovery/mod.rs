@@ -12,6 +12,8 @@ pub use txn_log::{TransactionLogKind, TransactionLogRecord};
 
 pub mod txn_recovery;
 
-pub use txn_recovery::{RecoveredTransactions, recover_transactions};
+pub use txn_recovery::{
+    RecoveredTransactions, recover_transactions, recover_transactions_after_checkpoint,
+};
 
 pub use checkpoint::{Checkpoint, CheckpointError, CheckpointManager};

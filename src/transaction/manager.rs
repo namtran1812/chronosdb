@@ -105,6 +105,14 @@ impl TransactionManager {
         self.states.get(&transaction_id).copied()
     }
 
+    pub fn states(&self) -> &HashMap<TransactionId, TransactionState> {
+        &self.states
+    }
+
+    pub fn next_transaction_id(&self) -> TransactionId {
+        self.next_transaction_id
+    }
+
     pub fn is_active(&self, transaction_id: TransactionId) -> bool {
         self.active.contains(&transaction_id)
     }

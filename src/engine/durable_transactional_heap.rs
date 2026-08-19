@@ -62,7 +62,12 @@ impl DurableTransactionalHeap {
 
         let checkpoint_path = wal_path.with_extension("checkpoint");
 
-        let transactions = DurableTransactionManager::open(&wal_path)?;
+        let checkpoint = CheckpointManager::new(&checkpoint_path)
+            .load()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+        let transactions =
+            DurableTransactionManager::open_with_checkpoint(&wal_path, checkpoint.as_ref())?;
 
         let shared_wal = transactions.shared_wal();
 
@@ -77,11 +82,7 @@ impl DurableTransactionalHeap {
 
             let mut wal = shared_wal.borrow_mut();
 
-            let checkpoint = CheckpointManager::new(&checkpoint_path)
-                .load()
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-
-            match checkpoint {
+            match checkpoint.as_ref() {
                 Some(checkpoint) => {
                     RecoveryManager::redo_after(&mut wal, &mut recovery_disk, checkpoint.lsn())?;
                 }
@@ -272,8 +273,14 @@ impl DurableTransactionalHeap {
             return Ok(None);
         };
 
+        let checkpoint = Checkpoint::new(
+            lsn,
+            self.transactions.manager().next_transaction_id(),
+            self.transactions.manager().states().clone(),
+        );
+
         CheckpointManager::new(&self.checkpoint_path)
-            .store(Checkpoint::new(lsn))
+            .store(&checkpoint)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
 
         Ok(Some(lsn))

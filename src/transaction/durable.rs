@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::recovery::{LogManager, recover_transactions};
+use crate::recovery::{
+    Checkpoint, LogManager, recover_transactions, recover_transactions_after_checkpoint,
+};
 
 use super::{Transaction, TransactionError, TransactionId, TransactionManager, TransactionState};
 
@@ -22,9 +24,20 @@ pub struct DurableTransactionManager {
 
 impl DurableTransactionManager {
     pub fn open(wal_path: impl AsRef<Path>) -> Result<Self, DurableTransactionError> {
+        Self::open_with_checkpoint(wal_path, None)
+    }
+
+    pub fn open_with_checkpoint(
+        wal_path: impl AsRef<Path>,
+        checkpoint: Option<&Checkpoint>,
+    ) -> Result<Self, DurableTransactionError> {
         let mut wal = LogManager::open(wal_path)?;
 
-        let recovered = recover_transactions(&mut wal)?;
+        let recovered = match checkpoint {
+            Some(checkpoint) => recover_transactions_after_checkpoint(checkpoint, &mut wal)?,
+
+            None => recover_transactions(&mut wal)?,
+        };
 
         let manager = TransactionManager::from_recovered(
             recovered.states().clone(),

@@ -4,6 +4,10 @@ use chronosdb::storage::DiskManager;
 
 #[test]
 fn checkpoint_metadata_round_trips() {
+    use std::collections::HashMap;
+
+    use chronosdb::transaction::TransactionState;
+
     let directory = tempfile::tempdir().unwrap();
 
     let path = directory.path().join("chronos.checkpoint");
@@ -12,9 +16,22 @@ fn checkpoint_metadata_round_trips() {
 
     assert_eq!(manager.load().unwrap(), None);
 
-    manager.store(Checkpoint::new(42)).unwrap();
+    let states = HashMap::from([
+        (1, TransactionState::Committed),
+        (2, TransactionState::Aborted),
+    ]);
 
-    assert_eq!(manager.load().unwrap().unwrap().lsn(), 42);
+    manager
+        .store(&Checkpoint::new(42, 3, states.clone()))
+        .unwrap();
+
+    let checkpoint = manager.load().unwrap().unwrap();
+
+    assert_eq!(checkpoint.lsn(), 42);
+
+    assert_eq!(checkpoint.next_transaction_id(), 3);
+
+    assert_eq!(checkpoint.states(), &states);
 }
 
 #[test]
@@ -145,4 +162,52 @@ fn repeated_restart_after_checkpoint_is_stable() {
 
         assert_eq!(rows[0].1.payload(), b"stable");
     }
+}
+
+#[test]
+fn checkpoint_restores_transaction_states() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    {
+        let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+        let committed = db.begin().unwrap();
+
+        db.insert(committed.id(), b"keep".to_vec()).unwrap();
+
+        db.commit(committed.id()).unwrap();
+
+        let aborted = db.begin().unwrap();
+
+        db.insert(aborted.id(), b"discard".to_vec()).unwrap();
+
+        db.abort(aborted.id()).unwrap();
+
+        db.checkpoint().unwrap();
+    }
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let reader = db.begin().unwrap();
+
+    /*
+     * If checkpoint transaction state was not
+     * restored correctly, xmin visibility would
+     * incorrectly hide the committed tuple.
+     */
+    let rows = db.visible_scan(&reader).unwrap();
+
+    assert_eq!(rows.len(), 1);
+
+    assert_eq!(rows[0].1.payload(), b"keep");
+
+    /*
+     * IDs must continue from the checkpoint's
+     * persisted next_transaction_id.
+     */
+    assert_eq!(reader.id(), 3);
 }
