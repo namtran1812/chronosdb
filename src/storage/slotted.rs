@@ -149,6 +149,76 @@ impl SlottedPage {
         Ok(&self.data[start..end])
     }
 
+    pub fn replace(&mut self, slot_id: SlotId, record: &[u8]) -> Result<(), SlottedPageError> {
+        if record.len() > u16::MAX as usize {
+            return Err(SlottedPageError::RecordTooLarge);
+        }
+
+        let slot = self.read_slot(slot_id)?;
+
+        if slot.len == 0 {
+            return Err(SlottedPageError::Deleted);
+        }
+
+        /*
+         * Shrinking or same-size replacement can preserve
+         * the current physical offset immediately.
+         */
+        if record.len() <= slot.len as usize {
+            let start = slot.offset as usize;
+
+            let end = start + record.len();
+
+            self.data[start..end].copy_from_slice(record);
+
+            self.write_slot(
+                slot_id,
+                Slot {
+                    offset: slot.offset,
+                    len: record.len() as u16,
+                },
+            );
+
+            return Ok(());
+        }
+
+        /*
+         * A growing replacement may reclaim the old tuple's
+         * space while keeping the logical SlotId stable.
+         */
+        let reclaimable = self.free_space() + slot.len as usize;
+
+        if record.len() > reclaimable {
+            return Err(SlottedPageError::NoSpace);
+        }
+
+        /*
+         * Temporarily tombstone the old slot so compaction
+         * ignores its current payload.
+         */
+        self.write_slot(
+            slot_id,
+            Slot {
+                offset: slot.offset,
+                len: 0,
+            },
+        );
+
+        self.compact();
+
+        let offset = self.allocate_payload(record)?;
+
+        self.write_slot(
+            slot_id,
+            Slot {
+                offset,
+                len: record.len() as u16,
+            },
+        );
+
+        Ok(())
+    }
+
     pub fn delete(&mut self, slot_id: SlotId) -> Result<(), SlottedPageError> {
         let mut slot = self.read_slot(slot_id)?;
 

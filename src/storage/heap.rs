@@ -69,6 +69,24 @@ impl HeapFile {
         self.insert_into_new_page(version)
     }
 
+    pub fn replace_version(
+        &mut self,
+        record_id: RecordId,
+        version: &TupleVersion,
+    ) -> Result<(), HeapFileError> {
+        let page = self.disk.read_page(record_id.page_id())?;
+
+        let slotted = self.page_to_slotted(&page);
+
+        let mut mvcc = MvccPage::from_slotted(record_id.page_id(), slotted);
+
+        mvcc.replace_version(record_id.slot_id(), version)?;
+
+        self.persist_mvcc_page(record_id.page_id(), mvcc)?;
+
+        Ok(())
+    }
+
     pub fn get_version(&mut self, record_id: RecordId) -> Result<TupleVersion, HeapFileError> {
         let page = self.disk.read_page(record_id.page_id())?;
 

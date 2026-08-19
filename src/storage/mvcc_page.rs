@@ -43,6 +43,18 @@ impl MvccPage {
         Ok(RecordId::new(self.page_id, slot_id))
     }
 
+    pub fn replace_version(
+        &mut self,
+        slot_id: SlotId,
+        version: &TupleVersion,
+    ) -> Result<(), MvccPageError> {
+        let bytes = encode_tuple(version);
+
+        self.page.replace(slot_id, &bytes)?;
+
+        Ok(())
+    }
+
     pub fn get_version(&self, slot_id: SlotId) -> Result<TupleVersion, MvccPageError> {
         let bytes = self.page.get(slot_id)?;
 
