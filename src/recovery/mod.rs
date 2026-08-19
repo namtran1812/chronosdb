@@ -1,5 +1,6 @@
 pub mod log;
-pub mod recovery;
+pub mod redo;
 
 pub use log::{LogManager, LogRecord, LogRecordType, Lsn};
-pub use recovery::{RecoveryError, RecoveryManager, RecoveryStats};
+
+pub use redo::{RecoveryError, RecoveryManager, RecoveryStats};
