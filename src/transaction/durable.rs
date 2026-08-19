@@ -99,4 +99,8 @@ impl DurableTransactionManager {
     pub fn shared_wal(&self) -> Rc<RefCell<LogManager>> {
         Rc::clone(&self.wal)
     }
+
+    pub fn latest_lsn(&self) -> Option<crate::recovery::Lsn> {
+        self.wal.borrow().next_lsn().checked_sub(1)
+    }
 }

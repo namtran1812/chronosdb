@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::recovery::RecoveryManager;
+use crate::recovery::{Checkpoint, CheckpointManager, RecoveryManager};
 use crate::storage::{
     BufferPoolManager, BufferedHeapError, BufferedHeapFile, DiskManager, RecordId,
 };
@@ -37,6 +37,7 @@ pub struct DurableTransactionalHeap {
     transactions: DurableTransactionManager,
     heap_path: PathBuf,
     wal_path: PathBuf,
+    checkpoint_path: PathBuf,
 }
 
 impl DurableTransactionalHeap {
@@ -56,6 +57,8 @@ impl DurableTransactionalHeap {
 
         let wal_path = wal_path.as_ref().to_path_buf();
 
+        let checkpoint_path = wal_path.with_extension("checkpoint");
+
         let transactions = DurableTransactionManager::open(&wal_path)?;
 
         let shared_wal = transactions.shared_wal();
@@ -71,7 +74,19 @@ impl DurableTransactionalHeap {
 
             let mut wal = shared_wal.borrow_mut();
 
-            RecoveryManager::redo(&mut wal, &mut recovery_disk)?;
+            let checkpoint = CheckpointManager::new(&checkpoint_path)
+                .load()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+            match checkpoint {
+                Some(checkpoint) => {
+                    RecoveryManager::redo_after(&mut wal, &mut recovery_disk, checkpoint.lsn())?;
+                }
+
+                None => {
+                    RecoveryManager::redo(&mut wal, &mut recovery_disk)?;
+                }
+            }
         }
 
         let buffer = BufferPoolManager::new_with_shared_wal(disk, shared_wal, pool_size);
@@ -81,6 +96,7 @@ impl DurableTransactionalHeap {
             transactions,
             heap_path,
             wal_path,
+            checkpoint_path,
         })
     }
 
@@ -222,5 +238,19 @@ impl DurableTransactionalHeap {
 
             _ => Err(DurableTransactionalHeapError::NotActive),
         }
+    }
+
+    pub fn checkpoint(&mut self) -> Result<Option<u64>, DurableTransactionalHeapError> {
+        self.heap.flush_all()?;
+
+        let Some(lsn) = self.transactions.latest_lsn() else {
+            return Ok(None);
+        };
+
+        CheckpointManager::new(&self.checkpoint_path)
+            .store(Checkpoint::new(lsn))
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+        Ok(Some(lsn))
     }
 }

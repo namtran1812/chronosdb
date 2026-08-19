@@ -1,7 +1,7 @@
 use crate::PAGE_SIZE;
 use crate::storage::{DiskManager, PageError};
 
-use super::{LogManager, LogRecordType};
+use super::{LogManager, LogRecord, LogRecordType, Lsn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryError {
@@ -30,6 +30,23 @@ impl RecoveryManager {
     ) -> Result<RecoveryStats, RecoveryError> {
         let records = log.records()?;
 
+        Self::redo_records(records, disk)
+    }
+
+    pub fn redo_after(
+        log: &mut LogManager,
+        disk: &mut DiskManager,
+        checkpoint_lsn: Lsn,
+    ) -> Result<RecoveryStats, RecoveryError> {
+        let records = log.records_after(checkpoint_lsn)?;
+
+        Self::redo_records(records, disk)
+    }
+
+    fn redo_records(
+        records: Vec<LogRecord>,
+        disk: &mut DiskManager,
+    ) -> Result<RecoveryStats, RecoveryError> {
         let mut stats = RecoveryStats {
             records_seen: records.len(),
             records_redone: 0,
@@ -65,6 +82,7 @@ impl RecoveryManager {
 
                     stats.records_redone += 1;
                 }
+
                 LogRecordType::TransactionBegin
                 | LogRecordType::TransactionCommit
                 | LogRecordType::TransactionAbort => {}

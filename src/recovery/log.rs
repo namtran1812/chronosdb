@@ -272,6 +272,13 @@ impl LogManager {
         read_valid_records(&mut self.file)
     }
 
+    pub fn records_after(&mut self, lsn: Lsn) -> std::io::Result<Vec<LogRecord>> {
+        Ok(read_valid_records(&mut self.file)?
+            .into_iter()
+            .filter(|record| record.lsn > lsn)
+            .collect())
+    }
+
     /// Forces the WAL to stable storage through at least `lsn`.
     ///
     /// This is the write-ahead half of the WAL-before-data invariant:
