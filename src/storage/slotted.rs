@@ -213,10 +213,10 @@ impl SlottedPage {
 
     fn find_deleted_slot(&self) -> Option<SlotId> {
         for slot_id in 0..self.slot_count() {
-            if let Ok(slot) = self.read_slot(slot_id) {
-                if slot.len == 0 {
-                    return Some(slot_id);
-                }
+            if let Ok(slot) = self.read_slot(slot_id)
+                && slot.len == 0
+            {
+                return Some(slot_id);
             }
         }
 
