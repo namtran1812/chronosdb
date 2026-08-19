@@ -170,14 +170,14 @@ impl BufferPoolManager {
 
         let frame = &mut self.frames[frame_id];
 
-        if let Some(page) = frame.page.as_ref() {
-            if frame.dirty || page.is_dirty() {
-                self.disk.write_page(page)?;
+        if let Some(page) = frame.page.as_ref()
+            && (frame.dirty || page.is_dirty())
+        {
+            self.disk.write_page(page)?;
 
-                self.disk.sync()?;
+            self.disk.sync()?;
 
-                frame.dirty = false;
-            }
+            frame.dirty = false;
         }
 
         Ok(())
