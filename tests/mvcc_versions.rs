@@ -295,3 +295,49 @@ fn transaction_state_lookup_is_used_for_visibility() {
         }
     },));
 }
+
+#[test]
+fn active_xmax_is_write_conflict() {
+    let mut manager = TransactionManager::new();
+
+    let creator = manager.begin();
+
+    let mut version = TupleVersion::new(creator.id(), b"value".to_vec());
+
+    manager.commit(creator.id()).unwrap();
+
+    let first = manager.begin();
+
+    version.mark_deleted(first.id());
+
+    let second = manager.begin();
+
+    assert_eq!(
+        version.conflicting_writer(second.id(), |txid| { manager.state(txid) },),
+        Some(first.id())
+    );
+}
+
+#[test]
+fn aborted_xmax_releases_write_conflict() {
+    let mut manager = TransactionManager::new();
+
+    let creator = manager.begin();
+
+    let mut version = TupleVersion::new(creator.id(), b"value".to_vec());
+
+    manager.commit(creator.id()).unwrap();
+
+    let first = manager.begin();
+
+    version.mark_deleted(first.id());
+
+    manager.abort(first.id()).unwrap();
+
+    let second = manager.begin();
+
+    assert_eq!(
+        version.conflicting_writer(second.id(), |txid| { manager.state(txid) },),
+        None
+    );
+}

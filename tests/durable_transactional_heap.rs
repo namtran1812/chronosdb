@@ -363,3 +363,222 @@ fn repeated_recovery_is_idempotent_for_heap_mutations() {
 
     assert_eq!(rows[0].1.payload(), b"once");
 }
+
+#[test]
+fn concurrent_updates_conflict() {
+    use chronosdb::engine::DurableTransactionalHeapError;
+
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"base".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    let first = db.begin().unwrap();
+
+    let second = db.begin().unwrap();
+
+    db.update(&first, record, b"first".to_vec()).unwrap();
+
+    let result = db.update(&second, record, b"second".to_vec());
+
+    assert!(matches!(
+        result,
+        Err(
+            DurableTransactionalHeapError::
+                WriteConflict(owner)
+        ) if owner == first.id()
+    ));
+}
+
+#[test]
+fn update_delete_conflict() {
+    use chronosdb::engine::DurableTransactionalHeapError;
+
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"value".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    let updater = db.begin().unwrap();
+
+    let deleter = db.begin().unwrap();
+
+    db.update(&updater, record, b"changed".to_vec()).unwrap();
+
+    let result = db.delete(&deleter, record);
+
+    assert!(matches!(
+        result,
+        Err(
+            DurableTransactionalHeapError::
+                WriteConflict(owner)
+        ) if owner == updater.id()
+    ));
+}
+
+#[test]
+fn delete_update_conflict() {
+    use chronosdb::engine::DurableTransactionalHeapError;
+
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"value".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    let deleter = db.begin().unwrap();
+
+    let updater = db.begin().unwrap();
+
+    db.delete(&deleter, record).unwrap();
+
+    let result = db.update(&updater, record, b"changed".to_vec());
+
+    assert!(matches!(
+        result,
+        Err(
+            DurableTransactionalHeapError::
+                WriteConflict(owner)
+        ) if owner == deleter.id()
+    ));
+}
+
+#[test]
+fn concurrent_deletes_conflict() {
+    use chronosdb::engine::DurableTransactionalHeapError;
+
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"value".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    let first = db.begin().unwrap();
+
+    let second = db.begin().unwrap();
+
+    db.delete(&first, record).unwrap();
+
+    let result = db.delete(&second, record);
+
+    assert!(matches!(
+        result,
+        Err(
+            DurableTransactionalHeapError::
+                WriteConflict(owner)
+        ) if owner == first.id()
+    ));
+}
+
+#[test]
+fn aborted_writer_releases_conflict() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"base".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    let failed_writer = db.begin().unwrap();
+
+    db.update(&failed_writer, record, b"discarded".to_vec())
+        .unwrap();
+
+    db.abort(failed_writer.id()).unwrap();
+
+    let retry = db.begin().unwrap();
+
+    db.update(&retry, record, b"winner".to_vec()).unwrap();
+
+    db.commit(retry.id()).unwrap();
+
+    let reader = db.begin().unwrap();
+
+    let rows = db.visible_scan(&reader).unwrap();
+
+    assert_eq!(rows.len(), 1);
+
+    assert_eq!(rows[0].1.payload(), b"winner");
+}
+
+#[test]
+fn committed_writer_blocks_stale_snapshot_write() {
+    use chronosdb::engine::DurableTransactionalHeapError;
+
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let creator = db.begin().unwrap();
+
+    let record = db.insert(creator.id(), b"base".to_vec()).unwrap();
+
+    db.commit(creator.id()).unwrap();
+
+    /*
+     * Both writers take snapshots before either
+     * performs the update.
+     */
+    let first = db.begin().unwrap();
+
+    let stale = db.begin().unwrap();
+
+    db.update(&first, record, b"first".to_vec()).unwrap();
+
+    db.commit(first.id()).unwrap();
+
+    let result = db.update(&stale, record, b"stale".to_vec());
+
+    assert!(matches!(
+        result,
+        Err(
+            DurableTransactionalHeapError::
+                WriteConflict(owner)
+        ) if owner == first.id()
+    ));
+}

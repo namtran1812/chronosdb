@@ -30,6 +30,9 @@ pub enum DurableTransactionalHeapError {
 
     #[error("record is not visible to transaction")]
     RecordNotVisible,
+
+    #[error("write conflict with transaction {0}")]
+    WriteConflict(TransactionId),
 }
 
 pub struct DurableTransactionalHeap {
@@ -149,6 +152,12 @@ impl DurableTransactionalHeap {
 
         let mut old_version = self.heap.get_version(record_id)?;
 
+        if let Some(owner) = old_version.conflicting_writer(transaction.id(), |transaction_id| {
+            self.transactions.state(transaction_id)
+        }) {
+            return Err(DurableTransactionalHeapError::WriteConflict(owner));
+        }
+
         if !old_version.visible_to(transaction.snapshot(), transaction.id(), |transaction_id| {
             self.transactions.state(transaction_id)
         }) {
@@ -172,6 +181,12 @@ impl DurableTransactionalHeap {
         self.ensure_active(transaction.id())?;
 
         let mut version = self.heap.get_version(record_id)?;
+
+        if let Some(owner) = version.conflicting_writer(transaction.id(), |transaction_id| {
+            self.transactions.state(transaction_id)
+        }) {
+            return Err(DurableTransactionalHeapError::WriteConflict(owner));
+        }
 
         if !version.visible_to(transaction.snapshot(), transaction.id(), |transaction_id| {
             self.transactions.state(transaction_id)

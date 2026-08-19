@@ -60,4 +60,25 @@ impl TupleVersion {
 
         !transaction_visible(xmax, deleter_state, snapshot, reader)
     }
+
+    pub fn conflicting_writer<F>(
+        &self,
+        writer: TransactionId,
+        mut state_of: F,
+    ) -> Option<TransactionId>
+    where
+        F: FnMut(TransactionId) -> Option<TransactionState>,
+    {
+        let xmax = self.xmax?;
+
+        if xmax == writer {
+            return None;
+        }
+
+        match state_of(xmax) {
+            Some(TransactionState::Active) | Some(TransactionState::Committed) => Some(xmax),
+
+            Some(TransactionState::Aborted) | None => None,
+        }
+    }
 }
