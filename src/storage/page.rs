@@ -1,3 +1,4 @@
+use crate::recovery::Lsn;
 use crate::{PAGE_SIZE, PageId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5,6 +6,7 @@ pub struct Page {
     id: PageId,
     data: Box<[u8; PAGE_SIZE]>,
     dirty: bool,
+    page_lsn: Option<Lsn>,
 }
 
 impl Page {
@@ -13,6 +15,7 @@ impl Page {
             id,
             data: Box::new([0; PAGE_SIZE]),
             dirty: false,
+            page_lsn: None,
         }
     }
 
@@ -56,6 +59,14 @@ impl Page {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub fn page_lsn(&self) -> Option<Lsn> {
+        self.page_lsn
+    }
+
+    pub fn set_page_lsn(&mut self, lsn: Lsn) {
+        self.page_lsn = Some(lsn);
     }
 
     pub fn mark_clean(&mut self) {

@@ -161,3 +161,41 @@ fn truncated_tail_is_ignored() {
 
     assert_eq!(records[0].payload, b"complete");
 }
+
+#[test]
+fn flush_through_makes_target_lsn_durable() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let path = directory.path().join("chronos.wal");
+
+    let mut log = LogManager::open(&path).unwrap();
+
+    let first = log.append_page_write(0, 0, b"one").unwrap();
+
+    let second = log.append_page_write(0, 8, b"two").unwrap();
+
+    assert_eq!(log.durable_lsn(), None);
+
+    log.flush_through(first).unwrap();
+
+    assert!(
+        log.durable_lsn()
+            .is_some_and(|durable| { durable >= first },)
+    );
+
+    assert!(
+        log.durable_lsn()
+            .is_some_and(|durable| { durable >= second },)
+    );
+}
+
+#[test]
+fn flush_through_unknown_lsn_fails() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let path = directory.path().join("chronos.wal");
+
+    let mut log = LogManager::open(&path).unwrap();
+
+    assert!(log.flush_through(0).is_err());
+}

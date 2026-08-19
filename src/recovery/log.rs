@@ -212,6 +212,26 @@ impl LogManager {
     pub fn records(&mut self) -> std::io::Result<Vec<LogRecord>> {
         read_valid_records(&mut self.file)
     }
+
+    /// Forces the WAL to stable storage through at least `lsn`.
+    ///
+    /// This is the write-ahead half of the WAL-before-data invariant:
+    /// a page carrying `lsn` must not reach durable storage before the
+    /// corresponding log record is durable.
+    pub fn flush_through(&mut self, lsn: Lsn) -> std::io::Result<()> {
+        if lsn >= self.next_lsn {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot flush through unknown LSN",
+            ));
+        }
+
+        if self.durable_lsn.is_some_and(|durable| durable >= lsn) {
+            return Ok(());
+        }
+
+        self.flush()
+    }
 }
 
 fn read_valid_records(file: &mut File) -> std::io::Result<Vec<LogRecord>> {

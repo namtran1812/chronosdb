@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::PageId;
-use crate::storage::{DiskManager, Page};
+use crate::recovery::{LogManager, Lsn};
+use crate::storage::{DiskManager, Page, PageError};
 
 pub type FrameId = usize;
 
@@ -39,6 +40,12 @@ pub enum BufferPoolError {
     #[error("page pin count is already zero")]
     PinCountUnderflow,
 
+    #[error("logged page write requires a WAL")]
+    WalNotConfigured,
+
+    #[error("page mutation failed: {0}")]
+    Page(String),
+
     #[error("disk I/O failed: {0}")]
     Io(String),
 }
@@ -49,8 +56,15 @@ impl From<std::io::Error> for BufferPoolError {
     }
 }
 
+impl From<PageError> for BufferPoolError {
+    fn from(error: PageError) -> Self {
+        Self::Page(error.to_string())
+    }
+}
+
 pub struct BufferPoolManager {
     disk: DiskManager,
+    wal: Option<LogManager>,
     frames: Vec<Frame>,
     page_table: HashMap<PageId, FrameId>,
     clock: u64,
@@ -58,10 +72,19 @@ pub struct BufferPoolManager {
 
 impl BufferPoolManager {
     pub fn new(disk: DiskManager, pool_size: usize) -> Self {
+        Self::build(disk, None, pool_size)
+    }
+
+    pub fn new_with_wal(disk: DiskManager, wal: LogManager, pool_size: usize) -> Self {
+        Self::build(disk, Some(wal), pool_size)
+    }
+
+    fn build(disk: DiskManager, wal: Option<LogManager>, pool_size: usize) -> Self {
         assert!(pool_size > 0, "buffer pool size must be positive");
 
         Self {
             disk,
+            wal,
             frames: (0..pool_size).map(|_| Frame::empty()).collect(),
             page_table: HashMap::new(),
             clock: 0,
@@ -74,6 +97,18 @@ impl BufferPoolManager {
 
     pub fn resident_pages(&self) -> usize {
         self.page_table.len()
+    }
+
+    pub fn wal_durable_lsn(&self) -> Option<Lsn> {
+        self.wal.as_ref().and_then(LogManager::durable_lsn)
+    }
+
+    pub fn flush_wal_through(&mut self, lsn: Lsn) -> Result<(), BufferPoolError> {
+        let wal = self.wal.as_mut().ok_or(BufferPoolError::WalNotConfigured)?;
+
+        wal.flush_through(lsn)?;
+
+        Ok(())
     }
 
     pub fn new_page(&mut self) -> Result<PageId, BufferPoolError> {
@@ -89,17 +124,7 @@ impl BufferPoolManager {
     }
 
     pub fn fetch_page(&mut self, page_id: PageId) -> Result<&Page, BufferPoolError> {
-        let frame_id = if let Some(&frame_id) = self.page_table.get(&page_id) {
-            frame_id
-        } else {
-            let frame_id = self.acquire_frame()?;
-
-            let page = self.disk.read_page(page_id)?;
-
-            self.install_page(frame_id, page);
-
-            frame_id
-        };
+        let frame_id = self.ensure_resident(page_id)?;
 
         self.clock += 1;
 
@@ -115,17 +140,7 @@ impl BufferPoolManager {
     }
 
     pub fn fetch_page_mut(&mut self, page_id: PageId) -> Result<&mut Page, BufferPoolError> {
-        let frame_id = if let Some(&frame_id) = self.page_table.get(&page_id) {
-            frame_id
-        } else {
-            let frame_id = self.acquire_frame()?;
-
-            let page = self.disk.read_page(page_id)?;
-
-            self.install_page(frame_id, page);
-
-            frame_id
-        };
+        let frame_id = self.ensure_resident(page_id)?;
 
         self.clock += 1;
 
@@ -139,6 +154,42 @@ impl BufferPoolManager {
             .page
             .as_mut()
             .expect("resident frame must contain a page"))
+    }
+
+    pub fn logged_write(
+        &mut self,
+        page_id: PageId,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<Lsn, BufferPoolError> {
+        let frame_id = self.ensure_resident(page_id)?;
+
+        let offset_u32 = u32::try_from(offset)
+            .map_err(|_| BufferPoolError::Page("page offset exceeds WAL format".to_owned()))?;
+
+        let lsn = {
+            let wal = self.wal.as_mut().ok_or(BufferPoolError::WalNotConfigured)?;
+
+            wal.append_page_write(page_id, offset_u32, bytes)?
+        };
+
+        let frame = &mut self.frames[frame_id];
+
+        let page = frame
+            .page
+            .as_mut()
+            .expect("resident frame must contain a page");
+
+        page.write(offset, bytes)?;
+
+        page.set_page_lsn(lsn);
+
+        frame.dirty = true;
+
+        self.clock += 1;
+        frame.last_access = self.clock;
+
+        Ok(lsn)
     }
 
     pub fn unpin_page(&mut self, page_id: PageId, dirty: bool) -> Result<(), BufferPoolError> {
@@ -168,17 +219,24 @@ impl BufferPoolManager {
             .get(&page_id)
             .ok_or(BufferPoolError::PageNotResident)?;
 
+        if !self.frame_needs_flush(frame_id) {
+            return Ok(());
+        }
+
+        self.flush_frame_wal(frame_id)?;
+
         let frame = &mut self.frames[frame_id];
 
-        if let Some(page) = frame.page.as_ref()
-            && (frame.dirty || page.is_dirty())
-        {
-            self.disk.write_page(page)?;
+        let page = frame
+            .page
+            .as_ref()
+            .expect("resident frame must contain a page");
 
-            self.disk.sync()?;
+        self.disk.write_page(page)?;
 
-            frame.dirty = false;
-        }
+        self.disk.sync()?;
+
+        frame.dirty = false;
 
         Ok(())
     }
@@ -199,8 +257,32 @@ impl BufferPoolManager {
             .map(|&frame_id| self.frames[frame_id].pin_count)
     }
 
+    pub fn page_lsn(&self, page_id: PageId) -> Option<Lsn> {
+        let frame_id = *self.page_table.get(&page_id)?;
+
+        self.frames[frame_id].page.as_ref().and_then(Page::page_lsn)
+    }
+
     pub fn is_resident(&self, page_id: PageId) -> bool {
         self.page_table.contains_key(&page_id)
+    }
+
+    fn ensure_resident(&mut self, page_id: PageId) -> Result<FrameId, BufferPoolError> {
+        if let Some(&frame_id) = self.page_table.get(&page_id) {
+            return Ok(frame_id);
+        }
+
+        let frame_id = self.acquire_frame()?;
+
+        let page = self.disk.read_page(page_id)?;
+
+        self.install_page(frame_id, page);
+
+        // Loading a page into the
+        // cache must not pin it.
+        self.frames[frame_id].pin_count = 0;
+
+        Ok(frame_id)
     }
 
     fn acquire_frame(&mut self) -> Result<FrameId, BufferPoolError> {
@@ -223,16 +305,20 @@ impl BufferPoolManager {
     }
 
     fn evict_frame(&mut self, frame_id: FrameId) -> Result<(), BufferPoolError> {
-        let frame = &mut self.frames[frame_id];
-
-        let page = frame
+        let page_id = self.frames[frame_id]
             .page
             .as_ref()
-            .expect("victim frame must contain a page");
+            .expect("victim frame must contain a page")
+            .id();
 
-        let page_id = page.id();
+        if self.frame_needs_flush(frame_id) {
+            self.flush_frame_wal(frame_id)?;
 
-        if frame.dirty || page.is_dirty() {
+            let page = self.frames[frame_id]
+                .page
+                .as_ref()
+                .expect("victim frame must contain a page");
+
             self.disk.write_page(page)?;
 
             self.disk.sync()?;
@@ -241,6 +327,26 @@ impl BufferPoolManager {
         self.page_table.remove(&page_id);
 
         self.frames[frame_id] = Frame::empty();
+
+        Ok(())
+    }
+
+    fn frame_needs_flush(&self, frame_id: FrameId) -> bool {
+        let frame = &self.frames[frame_id];
+
+        frame.dirty || frame.page.as_ref().is_some_and(Page::is_dirty)
+    }
+
+    fn flush_frame_wal(&mut self, frame_id: FrameId) -> Result<(), BufferPoolError> {
+        let page_lsn = self.frames[frame_id].page.as_ref().and_then(Page::page_lsn);
+
+        let Some(lsn) = page_lsn else {
+            return Ok(());
+        };
+
+        let wal = self.wal.as_mut().ok_or(BufferPoolError::WalNotConfigured)?;
+
+        wal.flush_through(lsn)?;
 
         Ok(())
     }
