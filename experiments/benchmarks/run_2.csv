@@ -1,0 +1,9 @@
+workload,count,seconds,ops_per_second
+insert,1000,0.044207,22621.09
+insert,5000,0.455155,10985.28
+recovery_full,100,0.009871,10130.30
+recovery_compacted,100,0.005386,18568.23
+recovery_full,1000,0.026402,37875.32
+recovery_compacted,1000,0.005778,173071.49
+recovery_full,5000,0.098506,50758.22
+recovery_compacted,5000,0.008122,615602.44
