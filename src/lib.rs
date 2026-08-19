@@ -1,5 +1,6 @@
 pub mod recovery;
 pub mod storage;
+pub mod transaction;
 
 pub type PageId = u64;
 
