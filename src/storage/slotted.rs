@@ -1,9 +1,15 @@
 use crate::PAGE_SIZE;
+use crate::storage::PAGE_HEADER_SIZE;
 
 pub type SlotId = u16;
 
-const HEADER_SIZE: usize = 6;
+const SLOT_HEADER_SIZE: usize = 6;
+const HEADER_SIZE: usize = PAGE_HEADER_SIZE + SLOT_HEADER_SIZE;
 const SLOT_SIZE: usize = 4;
+
+const SLOT_COUNT_OFFSET: usize = PAGE_HEADER_SIZE;
+const FREE_START_OFFSET: usize = PAGE_HEADER_SIZE + 2;
+const FREE_END_OFFSET: usize = PAGE_HEADER_SIZE + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Slot {
@@ -58,7 +64,7 @@ impl SlottedPage {
     }
 
     pub fn slot_count(&self) -> SlotId {
-        self.read_u16(0)
+        self.read_u16(SLOT_COUNT_OFFSET)
     }
 
     pub fn free_space(&self) -> usize {
@@ -112,7 +118,7 @@ impl SlottedPage {
 
         self.set_slot_count(slot_id + 1);
 
-        self.set_free_start((HEADER_SIZE + (self.slot_count() as usize * SLOT_SIZE)) as u16);
+        self.set_free_start((HEADER_SIZE + self.slot_count() as usize * SLOT_SIZE) as u16);
 
         self.write_slot(
             slot_id,
@@ -135,6 +141,10 @@ impl SlottedPage {
         let start = slot.offset as usize;
 
         let end = start + slot.len as usize;
+
+        if start < HEADER_SIZE || end > PAGE_SIZE {
+            return Err(SlottedPageError::InvalidSlot);
+        }
 
         Ok(&self.data[start..end])
     }
@@ -230,6 +240,10 @@ impl SlottedPage {
 
         let offset = HEADER_SIZE + slot_id as usize * SLOT_SIZE;
 
+        if offset + SLOT_SIZE > PAGE_SIZE {
+            return Err(SlottedPageError::InvalidSlot);
+        }
+
         Ok(Slot {
             offset: self.read_u16(offset),
             len: self.read_u16(offset + 2),
@@ -245,23 +259,23 @@ impl SlottedPage {
     }
 
     fn free_start(&self) -> u16 {
-        self.read_u16(2)
+        self.read_u16(FREE_START_OFFSET)
     }
 
     fn free_end(&self) -> u16 {
-        self.read_u16(4)
+        self.read_u16(FREE_END_OFFSET)
     }
 
     fn set_slot_count(&mut self, value: u16) {
-        self.write_u16(0, value);
+        self.write_u16(SLOT_COUNT_OFFSET, value);
     }
 
     fn set_free_start(&mut self, value: u16) {
-        self.write_u16(2, value);
+        self.write_u16(FREE_START_OFFSET, value);
     }
 
     fn set_free_end(&mut self, value: u16) {
-        self.write_u16(4, value);
+        self.write_u16(FREE_END_OFFSET, value);
     }
 
     fn read_u16(&self, offset: usize) -> u16 {

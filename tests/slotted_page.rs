@@ -7,7 +7,7 @@ fn new_page_is_empty() {
 
     assert_eq!(page.slot_count(), 0);
 
-    assert_eq!(page.free_space(), PAGE_SIZE - 6);
+    assert_eq!(page.free_space(), PAGE_SIZE - 22);
 }
 
 #[test]
