@@ -57,6 +57,24 @@ impl TransactionManager {
         }
     }
 
+    pub fn from_recovered(
+        states: HashMap<TransactionId, TransactionState>,
+        next_transaction_id: TransactionId,
+    ) -> Self {
+        let active = states
+            .iter()
+            .filter_map(|(transaction_id, state)| {
+                (*state == TransactionState::Active).then_some(*transaction_id)
+            })
+            .collect();
+
+        Self {
+            next_transaction_id,
+            states,
+            active,
+        }
+    }
+
     pub fn begin(&mut self) -> Transaction {
         let id = self.next_transaction_id;
 

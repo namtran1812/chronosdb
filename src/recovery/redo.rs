@@ -65,6 +65,9 @@ impl RecoveryManager {
 
                     stats.records_redone += 1;
                 }
+                LogRecordType::TransactionBegin
+                | LogRecordType::TransactionCommit
+                | LogRecordType::TransactionAbort => {}
             }
         }
 

@@ -199,3 +199,30 @@ fn flush_through_unknown_lsn_fails() {
 
     assert!(log.flush_through(0).is_err());
 }
+
+#[test]
+fn transaction_records_survive_wal_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let path = directory.path().join("chronos.wal");
+
+    {
+        let mut log = LogManager::open(&path).unwrap();
+
+        log.append_transaction_begin(7).unwrap();
+
+        log.append_transaction_commit(7).unwrap();
+
+        log.flush().unwrap();
+    }
+
+    let mut log = LogManager::open(&path).unwrap();
+
+    let records = log.records().unwrap();
+
+    assert_eq!(records.len(), 2);
+
+    assert_eq!(records[0].transaction_id(), Some(7));
+
+    assert_eq!(records[1].transaction_id(), Some(7));
+}

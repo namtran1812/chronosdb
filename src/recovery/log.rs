@@ -13,6 +13,9 @@ const MAGIC: u32 = 0x4348_524f;
 #[repr(u8)]
 pub enum LogRecordType {
     PageWrite = 1,
+    TransactionBegin = 2,
+    TransactionCommit = 3,
+    TransactionAbort = 4,
 }
 
 impl TryFrom<u8> for LogRecordType {
@@ -21,6 +24,9 @@ impl TryFrom<u8> for LogRecordType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::PageWrite),
+            2 => Ok(Self::TransactionBegin),
+            3 => Ok(Self::TransactionCommit),
+            4 => Ok(Self::TransactionAbort),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "unknown WAL record type",
@@ -39,6 +45,32 @@ pub struct LogRecord {
 }
 
 impl LogRecord {
+    pub fn transaction(lsn: Lsn, transaction_id: u64, record_type: LogRecordType) -> Self {
+        debug_assert!(matches!(
+            record_type,
+            LogRecordType::TransactionBegin
+                | LogRecordType::TransactionCommit
+                | LogRecordType::TransactionAbort
+        ));
+
+        Self {
+            lsn,
+            record_type,
+            page_id: transaction_id,
+            offset: 0,
+            payload: Vec::new(),
+        }
+    }
+
+    pub fn transaction_id(&self) -> Option<u64> {
+        match self.record_type {
+            LogRecordType::TransactionBegin
+            | LogRecordType::TransactionCommit
+            | LogRecordType::TransactionAbort => Some(self.page_id),
+            LogRecordType::PageWrite => None,
+        }
+    }
+
     pub fn page_write(lsn: Lsn, page_id: PageId, offset: u32, payload: Vec<u8>) -> Self {
         Self {
             lsn,
@@ -187,6 +219,33 @@ impl LogManager {
         let bytes = record.encode();
 
         self.file.write_all(&bytes)?;
+
+        Ok(lsn)
+    }
+
+    pub fn append_transaction_begin(&mut self, transaction_id: u64) -> std::io::Result<Lsn> {
+        self.append_transaction_record(transaction_id, LogRecordType::TransactionBegin)
+    }
+
+    pub fn append_transaction_commit(&mut self, transaction_id: u64) -> std::io::Result<Lsn> {
+        self.append_transaction_record(transaction_id, LogRecordType::TransactionCommit)
+    }
+
+    pub fn append_transaction_abort(&mut self, transaction_id: u64) -> std::io::Result<Lsn> {
+        self.append_transaction_record(transaction_id, LogRecordType::TransactionAbort)
+    }
+
+    fn append_transaction_record(
+        &mut self,
+        transaction_id: u64,
+        record_type: LogRecordType,
+    ) -> std::io::Result<Lsn> {
+        let lsn = self.next_lsn;
+        self.next_lsn += 1;
+
+        let record = LogRecord::transaction(lsn, transaction_id, record_type);
+
+        self.file.write_all(&record.encode())?;
 
         Ok(lsn)
     }

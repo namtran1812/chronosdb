@@ -1,3 +1,4 @@
+pub mod durable;
 pub mod manager;
 pub mod snapshot;
 pub mod state;
@@ -16,3 +17,5 @@ pub use version::TupleVersion;
 pub use version_chain::{VersionChain, VersionChainError};
 
 pub use tuple_codec::{TupleCodecError, decode_tuple, encode_tuple};
+
+pub use durable::{DurableTransactionError, DurableTransactionManager};
