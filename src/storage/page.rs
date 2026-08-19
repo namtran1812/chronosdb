@@ -1,12 +1,16 @@
 use crate::recovery::Lsn;
 use crate::{PAGE_SIZE, PageId};
 
+pub const PAGE_HEADER_SIZE: usize = 16;
+
+const PAGE_LSN_OFFSET: usize = 0;
+const PAGE_LSN_SIZE: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     id: PageId,
     data: Box<[u8; PAGE_SIZE]>,
     dirty: bool,
-    page_lsn: Option<Lsn>,
 }
 
 impl Page {
@@ -15,7 +19,6 @@ impl Page {
             id,
             data: Box::new([0; PAGE_SIZE]),
             dirty: false,
-            page_lsn: None,
         }
     }
 
@@ -36,7 +39,7 @@ impl Page {
             .checked_add(bytes.len())
             .ok_or(PageError::OutOfBounds)?;
 
-        if end > PAGE_SIZE {
+        if offset < PAGE_HEADER_SIZE || end > PAGE_SIZE {
             return Err(PageError::OutOfBounds);
         }
 
@@ -50,7 +53,7 @@ impl Page {
     pub fn read(&self, offset: usize, length: usize) -> Result<&[u8], PageError> {
         let end = offset.checked_add(length).ok_or(PageError::OutOfBounds)?;
 
-        if end > PAGE_SIZE {
+        if offset < PAGE_HEADER_SIZE || end > PAGE_SIZE {
             return Err(PageError::OutOfBounds);
         }
 
@@ -62,11 +65,24 @@ impl Page {
     }
 
     pub fn page_lsn(&self) -> Option<Lsn> {
-        self.page_lsn
+        let raw = u64::from_le_bytes(
+            self.data[PAGE_LSN_OFFSET..PAGE_LSN_OFFSET + PAGE_LSN_SIZE]
+                .try_into()
+                .expect("page LSN header has fixed width"),
+        );
+
+        raw.checked_sub(1)
     }
 
     pub fn set_page_lsn(&mut self, lsn: Lsn) {
-        self.page_lsn = Some(lsn);
+        let encoded = lsn
+            .checked_add(1)
+            .expect("LSN exceeds persistent page format");
+
+        self.data[PAGE_LSN_OFFSET..PAGE_LSN_OFFSET + PAGE_LSN_SIZE]
+            .copy_from_slice(&encoded.to_le_bytes());
+
+        self.dirty = true;
     }
 
     pub fn mark_clean(&mut self) {

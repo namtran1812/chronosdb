@@ -50,7 +50,16 @@ impl RecoveryManager {
 
                     let mut page = disk.read_page(record.page_id)?;
 
+                    if page
+                        .page_lsn()
+                        .is_some_and(|page_lsn| page_lsn >= record.lsn)
+                    {
+                        continue;
+                    }
+
                     page.write(record.offset as usize, &record.payload)?;
+
+                    page.set_page_lsn(record.lsn);
 
                     disk.write_page(&page)?;
 

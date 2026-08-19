@@ -13,11 +13,11 @@ fn page_starts_clean() {
 fn page_write_marks_dirty() {
     let mut page = Page::new(0);
 
-    page.write(10, b"chronos").unwrap();
+    page.write(32, b"chronos").unwrap();
 
     assert!(page.is_dirty());
 
-    assert_eq!(page.read(10, 7).unwrap(), b"chronos",);
+    assert_eq!(page.read(32, 7).unwrap(), b"chronos",);
 }
 
 #[test]
