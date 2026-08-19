@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::PageId;
 
@@ -176,22 +176,29 @@ impl LogRecord {
 
 pub struct LogManager {
     file: File,
+    path: PathBuf,
     next_lsn: Lsn,
     durable_lsn: Option<Lsn>,
 }
 
 impl LogManager {
     pub fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(path)?;
+            .open(&path)?;
 
         let records = read_valid_records(&mut file)?;
 
-        let next_lsn = records.last().map_or(0, |record| record.lsn + 1);
+        let physical_next = records.last().map_or(0, |record| record.lsn + 1);
+
+        let persisted_next = read_next_lsn_metadata(&path)?;
+
+        let next_lsn = physical_next.max(persisted_next.unwrap_or(0));
 
         let durable_lsn = records.last().map(|record| record.lsn);
 
@@ -199,6 +206,7 @@ impl LogManager {
 
         Ok(Self {
             file,
+            path,
             next_lsn,
             durable_lsn,
         })
@@ -257,6 +265,8 @@ impl LogManager {
             self.durable_lsn = Some(self.next_lsn - 1);
         }
 
+        persist_next_lsn_metadata(&self.path, self.next_lsn)?;
+
         Ok(())
     }
 
@@ -277,6 +287,58 @@ impl LogManager {
             .into_iter()
             .filter(|record| record.lsn > lsn)
             .collect())
+    }
+
+    pub fn compact_through(&mut self, checkpoint_lsn: Lsn) -> std::io::Result<usize> {
+        /*
+         * Ensure everything currently appended is durable
+         * before rewriting the WAL.
+         */
+        self.flush()?;
+
+        let records = read_valid_records(&mut self.file)?;
+
+        let retained: Vec<_> = records
+            .into_iter()
+            .filter(|record| record.lsn > checkpoint_lsn)
+            .collect();
+
+        let temporary = self.path.with_extension("wal.compact.tmp");
+
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&temporary)?;
+
+            for record in &retained {
+                file.write_all(&record.encode())?;
+            }
+
+            file.sync_all()?;
+        }
+
+        std::fs::rename(&temporary, &self.path)?;
+
+        self.file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.path)?;
+
+        self.file.seek(SeekFrom::End(0))?;
+
+        /*
+         * Do NOT derive next_lsn from retained records.
+         * It must remain logically monotonic across compaction.
+         */
+        persist_next_lsn_metadata(&self.path, self.next_lsn)?;
+
+        self.durable_lsn = self.next_lsn.checked_sub(1);
+
+        Ok(retained.len())
     }
 
     /// Forces the WAL to stable storage through at least `lsn`.
@@ -355,4 +417,48 @@ fn read_valid_records(file: &mut File) -> std::io::Result<Vec<LogRecord>> {
     file.seek(SeekFrom::End(0))?;
 
     Ok(records)
+}
+
+fn wal_metadata_path(wal_path: &Path) -> PathBuf {
+    let mut name = wal_path.as_os_str().to_os_string();
+
+    name.push(".meta");
+
+    PathBuf::from(name)
+}
+
+fn read_next_lsn_metadata(wal_path: &Path) -> std::io::Result<Option<Lsn>> {
+    let path = wal_metadata_path(wal_path);
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let mut file = File::open(path)?;
+
+    let mut bytes = [0_u8; 8];
+
+    file.read_exact(&mut bytes)?;
+
+    Ok(Some(Lsn::from_le_bytes(bytes)))
+}
+
+fn persist_next_lsn_metadata(wal_path: &Path, next_lsn: Lsn) -> std::io::Result<()> {
+    let path = wal_metadata_path(wal_path);
+
+    let temporary = path.with_extension("meta.tmp");
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temporary)?;
+
+    file.write_all(&next_lsn.to_le_bytes())?;
+
+    file.sync_all()?;
+
+    std::fs::rename(temporary, path)?;
+
+    Ok(())
 }

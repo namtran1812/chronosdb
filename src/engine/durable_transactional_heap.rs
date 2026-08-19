@@ -285,4 +285,19 @@ impl DurableTransactionalHeap {
 
         Ok(Some(lsn))
     }
+
+    pub fn checkpoint_and_compact(&mut self) -> Result<Option<u64>, DurableTransactionalHeapError> {
+        let Some(lsn) = self.checkpoint()? else {
+            return Ok(None);
+        };
+
+        /*
+         * The checkpoint is already durable and contains
+         * the transaction-state snapshot required to recover
+         * without historical WAL records.
+         */
+        self.transactions.compact_wal_through(lsn)?;
+
+        Ok(Some(lsn))
+    }
 }

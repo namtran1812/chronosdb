@@ -226,3 +226,78 @@ fn transaction_records_survive_wal_reopen() {
 
     assert_eq!(records[1].transaction_id(), Some(7));
 }
+
+#[test]
+fn wal_compaction_removes_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let path = directory.path().join("chronos.wal");
+
+    let checkpoint_lsn;
+
+    {
+        let mut wal = LogManager::open(&path).unwrap();
+
+        wal.append_transaction_begin(1).unwrap();
+
+        checkpoint_lsn = wal.append_transaction_commit(1).unwrap();
+
+        wal.append_transaction_begin(2).unwrap();
+
+        wal.append_transaction_commit(2).unwrap();
+
+        wal.flush().unwrap();
+
+        assert_eq!(wal.compact_through(checkpoint_lsn,).unwrap(), 2);
+    }
+
+    let mut wal = LogManager::open(&path).unwrap();
+
+    let records = wal.records().unwrap();
+
+    assert_eq!(records.len(), 2);
+
+    assert!(
+        records
+            .iter()
+            .all(|record| { record.lsn > checkpoint_lsn },)
+    );
+}
+
+#[test]
+fn empty_compacted_wal_preserves_next_lsn() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let path = directory.path().join("chronos.wal");
+
+    let expected_next;
+
+    {
+        let mut wal = LogManager::open(&path).unwrap();
+
+        let first = wal.append_transaction_begin(1).unwrap();
+
+        let last = wal.append_transaction_commit(1).unwrap();
+
+        wal.flush().unwrap();
+
+        assert_eq!(first, 0);
+        assert_eq!(last, 1);
+
+        expected_next = wal.next_lsn();
+
+        assert_eq!(expected_next, 2);
+
+        wal.compact_through(last).unwrap();
+
+        assert!(wal.records().unwrap().is_empty());
+    }
+
+    let mut wal = LogManager::open(&path).unwrap();
+
+    assert_eq!(wal.next_lsn(), expected_next);
+
+    let next = wal.append_transaction_begin(2).unwrap();
+
+    assert_eq!(next, expected_next);
+}

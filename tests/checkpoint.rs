@@ -211,3 +211,98 @@ fn checkpoint_restores_transaction_states() {
      */
     assert_eq!(reader.id(), 3);
 }
+
+#[test]
+fn compacted_checkpoint_recovers_database() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    let next_expected;
+
+    {
+        let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+        let first = db.begin().unwrap();
+
+        db.insert(first.id(), b"before".to_vec()).unwrap();
+
+        db.commit(first.id()).unwrap();
+
+        db.checkpoint_and_compact().unwrap();
+
+        let second = db.begin().unwrap();
+
+        next_expected = second.id() + 1;
+
+        db.insert(second.id(), b"after".to_vec()).unwrap();
+
+        db.commit(second.id()).unwrap();
+
+        /*
+         * No heap sync after second transaction.
+         * Its WAL suffix must recover normally.
+         */
+    }
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let reader = db.begin().unwrap();
+
+    assert_eq!(reader.id(), next_expected);
+
+    let mut payloads: Vec<_> = db
+        .visible_scan(&reader)
+        .unwrap()
+        .into_iter()
+        .map(|(_, version)| version.payload().to_vec())
+        .collect();
+
+    payloads.sort();
+
+    assert_eq!(payloads, vec![b"after".to_vec(), b"before".to_vec(),]);
+}
+
+#[test]
+fn checkpoint_can_compact_wal_to_empty() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let heap_path = directory.path().join("table.heap");
+
+    let wal_path = directory.path().join("chronos.wal");
+
+    {
+        let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+        let writer = db.begin().unwrap();
+
+        db.insert(writer.id(), b"stable".to_vec()).unwrap();
+
+        db.commit(writer.id()).unwrap();
+
+        db.checkpoint_and_compact().unwrap();
+    }
+
+    /*
+     * Physical WAL may now contain zero records,
+     * but transaction state and logical IDs come
+     * from checkpoint + WAL metadata.
+     */
+    let mut wal = LogManager::open(&wal_path).unwrap();
+
+    assert!(wal.records().unwrap().is_empty());
+
+    let mut db = DurableTransactionalHeap::open(&heap_path, &wal_path).unwrap();
+
+    let reader = db.begin().unwrap();
+
+    assert_eq!(reader.id(), 2);
+
+    let rows = db.visible_scan(&reader).unwrap();
+
+    assert_eq!(rows.len(), 1);
+
+    assert_eq!(rows[0].1.payload(), b"stable");
+}

@@ -120,4 +120,11 @@ impl DurableTransactionManager {
     pub fn oldest_active_xmin(&self) -> TransactionId {
         self.manager.oldest_active_xmin()
     }
+
+    pub fn compact_wal_through(
+        &mut self,
+        checkpoint_lsn: crate::recovery::Lsn,
+    ) -> Result<usize, DurableTransactionError> {
+        Ok(self.wal.borrow_mut().compact_through(checkpoint_lsn)?)
+    }
 }
