@@ -1,3 +1,4 @@
+pub mod recovery;
 pub mod storage;
 
 pub type PageId = u64;
