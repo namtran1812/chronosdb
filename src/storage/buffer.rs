@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::PageId;
 use crate::recovery::{LogManager, Lsn};
@@ -64,7 +66,7 @@ impl From<PageError> for BufferPoolError {
 
 pub struct BufferPoolManager {
     disk: DiskManager,
-    wal: Option<LogManager>,
+    wal: Option<Rc<RefCell<LogManager>>>,
     frames: Vec<Frame>,
     page_table: HashMap<PageId, FrameId>,
     clock: u64,
@@ -76,10 +78,18 @@ impl BufferPoolManager {
     }
 
     pub fn new_with_wal(disk: DiskManager, wal: LogManager, pool_size: usize) -> Self {
+        Self::build(disk, Some(Rc::new(RefCell::new(wal))), pool_size)
+    }
+
+    pub fn new_with_shared_wal(
+        disk: DiskManager,
+        wal: Rc<RefCell<LogManager>>,
+        pool_size: usize,
+    ) -> Self {
         Self::build(disk, Some(wal), pool_size)
     }
 
-    fn build(disk: DiskManager, wal: Option<LogManager>, pool_size: usize) -> Self {
+    fn build(disk: DiskManager, wal: Option<Rc<RefCell<LogManager>>>, pool_size: usize) -> Self {
         assert!(pool_size > 0, "buffer pool size must be positive");
 
         Self {
@@ -95,18 +105,22 @@ impl BufferPoolManager {
         self.frames.len()
     }
 
+    pub fn page_count(&self) -> PageId {
+        self.disk.page_count()
+    }
+
     pub fn resident_pages(&self) -> usize {
         self.page_table.len()
     }
 
     pub fn wal_durable_lsn(&self) -> Option<Lsn> {
-        self.wal.as_ref().and_then(LogManager::durable_lsn)
+        self.wal.as_ref().and_then(|wal| wal.borrow().durable_lsn())
     }
 
     pub fn flush_wal_through(&mut self, lsn: Lsn) -> Result<(), BufferPoolError> {
-        let wal = self.wal.as_mut().ok_or(BufferPoolError::WalNotConfigured)?;
+        let wal = self.wal.as_ref().ok_or(BufferPoolError::WalNotConfigured)?;
 
-        wal.flush_through(lsn)?;
+        wal.borrow_mut().flush_through(lsn)?;
 
         Ok(())
     }
@@ -168,9 +182,10 @@ impl BufferPoolManager {
             .map_err(|_| BufferPoolError::Page("page offset exceeds WAL format".to_owned()))?;
 
         let lsn = {
-            let wal = self.wal.as_mut().ok_or(BufferPoolError::WalNotConfigured)?;
+            let wal = self.wal.as_ref().ok_or(BufferPoolError::WalNotConfigured)?;
 
-            wal.append_page_write(page_id, offset_u32, bytes)?
+            wal.borrow_mut()
+                .append_page_write(page_id, offset_u32, bytes)?
         };
 
         let frame = &mut self.frames[frame_id];
@@ -344,9 +359,9 @@ impl BufferPoolManager {
             return Ok(());
         };
 
-        let wal = self.wal.as_mut().ok_or(BufferPoolError::WalNotConfigured)?;
+        let wal = self.wal.as_ref().ok_or(BufferPoolError::WalNotConfigured)?;
 
-        wal.flush_through(lsn)?;
+        wal.borrow_mut().flush_through(lsn)?;
 
         Ok(())
     }

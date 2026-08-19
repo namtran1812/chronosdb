@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod buffered_heap;
 pub mod disk;
 pub mod heap;
 pub mod mvcc_page;
@@ -18,3 +19,5 @@ pub use record::RecordId;
 pub use mvcc_page::{MvccPage, MvccPageError};
 
 pub use heap::{HeapFile, HeapFileError};
+
+pub use buffered_heap::{BufferedHeapError, BufferedHeapFile};

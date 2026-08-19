@@ -1,18 +1,29 @@
 use std::path::{Path, PathBuf};
 
-use crate::storage::{HeapFile, HeapFileError, RecordId};
+use crate::recovery::RecoveryManager;
+use crate::storage::{
+    BufferPoolManager, BufferedHeapError, BufferedHeapFile, DiskManager, RecordId,
+};
 use crate::transaction::{
     DurableTransactionError, DurableTransactionManager, Transaction, TransactionId,
     TransactionState, TupleVersion,
 };
 
+const DEFAULT_BUFFER_POOL_SIZE: usize = 64;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DurableTransactionalHeapError {
     #[error("heap operation failed: {0}")]
-    Heap(#[from] HeapFileError),
+    Heap(#[from] BufferedHeapError),
 
     #[error("transaction operation failed: {0}")]
     Transaction(#[from] DurableTransactionError),
+
+    #[error("recovery failed: {0}")]
+    Recovery(#[from] crate::recovery::RecoveryError),
+
+    #[error("disk I/O failed: {0}")]
+    Io(#[from] std::io::Error),
 
     #[error("transaction is not active")]
     NotActive,
@@ -22,7 +33,7 @@ pub enum DurableTransactionalHeapError {
 }
 
 pub struct DurableTransactionalHeap {
-    heap: HeapFile,
+    heap: BufferedHeapFile,
     transactions: DurableTransactionManager,
     heap_path: PathBuf,
     wal_path: PathBuf,
@@ -33,13 +44,41 @@ impl DurableTransactionalHeap {
         heap_path: impl AsRef<Path>,
         wal_path: impl AsRef<Path>,
     ) -> Result<Self, DurableTransactionalHeapError> {
+        Self::open_with_pool_size(heap_path, wal_path, DEFAULT_BUFFER_POOL_SIZE)
+    }
+
+    pub fn open_with_pool_size(
+        heap_path: impl AsRef<Path>,
+        wal_path: impl AsRef<Path>,
+        pool_size: usize,
+    ) -> Result<Self, DurableTransactionalHeapError> {
         let heap_path = heap_path.as_ref().to_path_buf();
 
         let wal_path = wal_path.as_ref().to_path_buf();
 
+        let transactions = DurableTransactionManager::open(&wal_path)?;
+
+        let shared_wal = transactions.shared_wal();
+
+        let disk = DiskManager::open(&heap_path)?;
+
+        /*
+         * REDO all durable page WAL before the buffer
+         * pool starts serving pages.
+         */
+        {
+            let mut recovery_disk = DiskManager::open(&heap_path)?;
+
+            let mut wal = shared_wal.borrow_mut();
+
+            RecoveryManager::redo(&mut wal, &mut recovery_disk)?;
+        }
+
+        let buffer = BufferPoolManager::new_with_shared_wal(disk, shared_wal, pool_size);
+
         Ok(Self {
-            heap: HeapFile::open(&heap_path)?,
-            transactions: DurableTransactionManager::open(&wal_path)?,
+            heap: BufferedHeapFile::new(buffer),
+            transactions,
             heap_path,
             wal_path,
         })
@@ -53,6 +92,11 @@ impl DurableTransactionalHeap {
         &mut self,
         transaction_id: TransactionId,
     ) -> Result<(), DurableTransactionalHeapError> {
+        /*
+         * Page-write WAL records were appended before the
+         * commit record. Flushing COMMIT therefore makes
+         * every preceding page mutation durable as well.
+         */
         self.transactions.commit(transaction_id)?;
 
         Ok(())
@@ -149,8 +193,7 @@ impl DurableTransactionalHeap {
     }
 
     pub fn sync(&mut self) -> Result<(), DurableTransactionalHeapError> {
-        self.heap.sync()?;
-
+        self.heap.flush_all()?;
         Ok(())
     }
 

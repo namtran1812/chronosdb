@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::recovery::{LogManager, recover_transactions};
 
@@ -15,7 +17,7 @@ pub enum DurableTransactionError {
 
 pub struct DurableTransactionManager {
     manager: TransactionManager,
-    wal: LogManager,
+    wal: Rc<RefCell<LogManager>>,
 }
 
 impl DurableTransactionManager {
@@ -29,35 +31,59 @@ impl DurableTransactionManager {
             recovered.next_transaction_id(),
         );
 
-        Ok(Self { manager, wal })
+        Ok(Self {
+            manager,
+            wal: Rc::new(RefCell::new(wal)),
+        })
     }
 
     pub fn begin(&mut self) -> Result<Transaction, DurableTransactionError> {
         let transaction = self.manager.begin();
 
-        let lsn = self.wal.append_transaction_begin(transaction.id())?;
+        let lsn = self
+            .wal
+            .borrow_mut()
+            .append_transaction_begin(transaction.id())?;
 
-        self.wal.flush_through(lsn)?;
+        self.wal.borrow_mut().flush_through(lsn)?;
 
         Ok(transaction)
     }
 
     pub fn commit(&mut self, transaction_id: TransactionId) -> Result<(), DurableTransactionError> {
+        if self.manager.state(transaction_id) != Some(TransactionState::Active) {
+            self.manager.commit(transaction_id)?;
+
+            unreachable!("commit validation should have returned");
+        }
+
+        let lsn = self
+            .wal
+            .borrow_mut()
+            .append_transaction_commit(transaction_id)?;
+
+        self.wal.borrow_mut().flush_through(lsn)?;
+
         self.manager.commit(transaction_id)?;
-
-        let lsn = self.wal.append_transaction_commit(transaction_id)?;
-
-        self.wal.flush_through(lsn)?;
 
         Ok(())
     }
 
     pub fn abort(&mut self, transaction_id: TransactionId) -> Result<(), DurableTransactionError> {
+        if self.manager.state(transaction_id) != Some(TransactionState::Active) {
+            self.manager.abort(transaction_id)?;
+
+            unreachable!("abort validation should have returned");
+        }
+
+        let lsn = self
+            .wal
+            .borrow_mut()
+            .append_transaction_abort(transaction_id)?;
+
+        self.wal.borrow_mut().flush_through(lsn)?;
+
         self.manager.abort(transaction_id)?;
-
-        let lsn = self.wal.append_transaction_abort(transaction_id)?;
-
-        self.wal.flush_through(lsn)?;
 
         Ok(())
     }
@@ -68,5 +94,9 @@ impl DurableTransactionManager {
 
     pub fn manager(&self) -> &TransactionManager {
         &self.manager
+    }
+
+    pub fn shared_wal(&self) -> Rc<RefCell<LogManager>> {
+        Rc::clone(&self.wal)
     }
 }
